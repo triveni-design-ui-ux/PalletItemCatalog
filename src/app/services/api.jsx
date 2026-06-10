@@ -41,6 +41,60 @@ const matchesSearch = (item, searchQuery) => {
   return getSearchText(item).includes(query);
 };
 
+const getImageUrl = (item) => {
+  if (item.image?.imageURL) return item.image.imageURL;
+
+  if (item.image?.imagePath) {
+    return item.image.imagePath.startsWith("http")
+      ? item.image.imagePath
+      : `http://45.77.221.159:49${item.image.imagePath}`;
+  }
+
+  return null;
+};
+
+const normalizeFilterValue = (value) => String(value || "").trim();
+
+const hasFilters = (filters = {}) =>
+  Boolean(
+    normalizeFilterValue(filters.category) ||
+      (Array.isArray(filters.subCategories) && filters.subCategories.length),
+  );
+
+const matchesFilters = (item, filters = {}) => {
+  const category = normalizeFilterValue(filters.category);
+  const subCategories = Array.isArray(filters.subCategories)
+    ? filters.subCategories.map(normalizeFilterValue).filter(Boolean)
+    : [];
+
+  if (
+    category &&
+    normalizeFilterValue(item.categoryTax?.primaryCategoryName) !== category
+  ) {
+    return false;
+  }
+
+  if (
+    subCategories.length &&
+    !subCategories.includes(
+      normalizeFilterValue(item.categoryTax?.secondaryCategoryName),
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+};
+
+const paginate = (items, pageSize, pageNumber) => {
+  const start = (pageNumber - 1) * pageSize;
+
+  return {
+    data: items.slice(start, start + pageSize),
+    totalRecords: items.length,
+  };
+};
+
 const getTotalPages = (paging) => {
   if (!paging) return 1;
 
@@ -94,8 +148,60 @@ export const warmSearchCatalog = () => {
   });
 };
 
-export const getItems = async (pageSize = 100, pageNumber = 1) => {
+export const getCategoryFilters = async () => {
+  const catalog = await getSearchCatalog();
+  const categoryMap = new Map();
+
+  catalog.forEach((item) => {
+    const categoryName = normalizeFilterValue(
+      item.categoryTax?.primaryCategoryName,
+    );
+    const subCategoryName = normalizeFilterValue(
+      item.categoryTax?.secondaryCategoryName,
+    );
+
+    if (!categoryName) return;
+
+    if (!categoryMap.has(categoryName)) {
+      categoryMap.set(categoryName, {
+        name: categoryName,
+        imageUrl: getImageUrl(item),
+        subCategories: new Set(),
+      });
+    }
+
+    const category = categoryMap.get(categoryName);
+
+    if (!category.imageUrl) {
+      category.imageUrl = getImageUrl(item);
+    }
+
+    if (subCategoryName) {
+      category.subCategories.add(subCategoryName);
+    }
+  });
+
+  return Array.from(categoryMap.values())
+    .map((category) => ({
+      ...category,
+      subCategories: Array.from(category.subCategories).sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+};
+
+export const getItems = async (pageSize = 100, pageNumber = 1, filters = {}) => {
   try {
+    if (hasFilters(filters)) {
+      const catalog = await getSearchCatalog();
+      const filteredItems = catalog.filter((item) =>
+        matchesFilters(item, filters),
+      );
+
+      return paginate(filteredItems, pageSize, pageNumber);
+    }
+
     const response = await api.post("/api/ShopifyItem/Item/external/get", {
       pageNumber,
       pageSize,
@@ -118,17 +224,16 @@ export const searchItems = async (
   searchQuery = "",
   pageSize = 100,
   pageNumber = 1,
+  filters = {},
 ) => {
   try {
     const query = searchQuery.trim();
     const catalog = await getSearchCatalog();
-    const filteredItems = catalog.filter((item) => matchesSearch(item, query));
-    const start = (pageNumber - 1) * pageSize;
+    const filteredItems = catalog.filter(
+      (item) => matchesSearch(item, query) && matchesFilters(item, filters),
+    );
 
-    return {
-      data: filteredItems.slice(start, start + pageSize),
-      totalRecords: filteredItems.length,
-    };
+    return paginate(filteredItems, pageSize, pageNumber);
   } catch (error) {
     console.log("Status:", error.response?.status);
     console.log("Response:", error.response?.data);

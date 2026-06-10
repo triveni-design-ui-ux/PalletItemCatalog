@@ -1,13 +1,23 @@
 import { Header } from "@/components/header";
+import { StatusBanner } from "@/components/status-banner";
 import { ItemsContext } from "@/context/ItemsContext";
+import { useItems } from "@/hooks/useItems";
+import {
+  emptyFilters,
+  type FilterCategory,
+  type ItemCatalogItem,
+  type ItemFilters,
+} from "@/services/itemApi";
+import { syncIntervals, type SyncIntervalMinutes } from "@/storage/itemStorage";
 import { Ionicons } from "@expo/vector-icons";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
   Image,
   Modal,
   Platform,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,33 +28,17 @@ import {
   SafeAreaView,
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
-import { getItems, searchItems, warmSearchCatalog } from "../app/services/api";
-const ITEMS_PER_PAGE = 10;
-const SEARCH_ITEMS_PER_PAGE = 20;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const ITEMS_PER_PAGE = 20;
 const SKELETON_ITEMS = Array.from({ length: 10 }, (_, index) => index);
 const PLACEHOLDER_IMAGE = require("@/assets/images/no-image.png");
 
-const getItemSearchText = (item: any) =>
-  [
-    item.identity?.itemName,
-    item.identity?.itemCode,
-    item.identity?.brandName,
-    item.identity?.vendorName,
-    item.identity?.departmentName,
-    item.categoryTax?.primaryCategoryName,
-    item.categoryTax?.secondaryCategoryName,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const matchesSearchQuery = (item: any, query: string) =>
-  getItemSearchText(item).includes(query.toLowerCase());
-
-const getItemImageUrl = (item: any) => {
-  if (item.image?.imageURL) {
-    return item.image.imageURL;
-  }
+const getItemImageUrl = (item: ItemCatalogItem): string | null => {
+  if (item.image?.imageURL) return item.image.imageURL;
 
   if (item.image?.imagePath) {
     return item.image.imagePath.startsWith("http")
@@ -55,7 +49,25 @@ const getItemImageUrl = (item: any) => {
   return null;
 };
 
-function ItemCard({ item }: { item: any }) {
+const formatSyncTime = (timestamp: number | null): string => {
+  if (!timestamp) return "Never";
+
+  const diff = Date.now() - timestamp;
+  const mins = Math.floor(diff / 60_000);
+
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+
+  const hrs = Math.floor(mins / 60);
+
+  if (hrs < 24) return `${hrs}h ago`;
+
+  return new Date(timestamp).toLocaleDateString();
+};
+
+// ─── ItemCard ─────────────────────────────────────────────────────────────────
+
+function ItemCard({ item }: { item: ItemCatalogItem }) {
   const sourceImageUrl = getItemImageUrl(item);
   const [imageUrl, setImageUrl] = useState(sourceImageUrl);
   const [isImageLoading, setIsImageLoading] = useState(true);
@@ -114,195 +126,10 @@ function ItemCard({ item }: { item: any }) {
   );
 }
 
-export default function Index() {
-  const { setTotalItems } = useContext(ItemsContext);
-  const insets = useSafeAreaInsets();
-  const didRunSearchEffect = useRef(false);
-  const latestRequestId = useRef(0);
+// ─── Skeleton card ────────────────────────────────────────────────────────────
 
-  const [filterVisible, setFilterVisible] = useState(false);
-  const [selectedPrice, setSelectedPrice] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState("");
-  const [selectedSubCategory, setSelectedSubCategory] = useState("");
-
-  const [items, setItems] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [totalRecords, setTotalRecords] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
-
-  const containerStyle = Platform.select({
-    native: { paddingTop: 0 },
-    web: { paddingTop: 0 },
-  });
-
-  const handleFilterPress = () => {
-    setFilterVisible(true);
-  };
-
-  useEffect(() => {
-    fetchItems(1);
-    warmSearchCatalog();
-  }, []);
-
-  // Handle search with debouncing
-  useEffect(() => {
-    if (!didRunSearchEffect.current) {
-      didRunSearchEffect.current = true;
-      return;
-    }
-
-    const delaySearch = setTimeout(() => {
-      const query = searchQuery.trim();
-
-      if (query) {
-        performSearch(query, 1);
-      } else {
-        setCurrentPage(1);
-        fetchItems(1, { showInitialLoader: false });
-      }
-    }, 500);
-
-    return () => clearTimeout(delaySearch);
-  }, [searchQuery]);
-
-  const fetchItems = async (
-    pageNum: number,
-    options: { showInitialLoader?: boolean } = {},
-  ) => {
-    const requestId = ++latestRequestId.current;
-
-    try {
-      const isFirstPage = pageNum === 1;
-      const showInitialLoader = options.showInitialLoader ?? true;
-
-      setError(null);
-      if (isFirstPage && showInitialLoader) setLoading(true);
-      else if (isFirstPage) setIsSearching(true);
-      else setLoadingMore(true);
-
-      const response = await getItems(ITEMS_PER_PAGE, pageNum);
-
-      if (requestId !== latestRequestId.current) return;
-
-      const itemsData = response.data || [];
-
-      let total = 0;
-
-      try {
-        const paging = JSON.parse(response.Paging || "{}");
-        total = paging.TotalRecords || 0;
-      } catch {
-        const match = response.Paging?.match(/TotalRecords:(\d+)/);
-        total = match ? parseInt(match[1], 10) : 0;
-      }
-
-      setTotalRecords(total);
-      setTotalItems(total);
-      setCurrentPage(pageNum);
-
-      if (isFirstPage) {
-        setItems(itemsData);
-      } else {
-        setItems((prev) => [...prev, ...itemsData]);
-      }
-    } catch (err) {
-      if (requestId !== latestRequestId.current) return;
-
-      const msg = err instanceof Error ? err.message : "Failed to load items";
-      setError(msg);
-    } finally {
-      if (requestId !== latestRequestId.current) return;
-
-      if (pageNum === 1) {
-        setLoading(false);
-        setIsSearching(false);
-      } else setLoadingMore(false);
-    }
-  };
-
-  const handleEndReached = () => {
-    if (loadingMore || items.length >= totalRecords) return;
-
-    fetchItems(currentPage + 1);
-  };
-
-  const handleMenuPress = () => {
-    // Handle hamburger menu press
-    console.log("Menu pressed");
-  };
-
-  const handleSearch = (text: string) => {
-    console.log("Received Search:", text);
-    setSearchQuery(text);
-  };
-
-  const performSearch = async (query: string, pageNum: number) => {
-    const requestId = ++latestRequestId.current;
-
-    try {
-      const isFirstPage = pageNum === 1;
-
-      setError(null);
-      if (isFirstPage) {
-        const visibleMatches = items.filter((item) =>
-          matchesSearchQuery(item, query),
-        );
-
-        setIsSearching(true);
-        setItems(visibleMatches);
-        setTotalRecords(visibleMatches.length);
-      } else setLoadingMore(true);
-
-      const response = await searchItems(query, SEARCH_ITEMS_PER_PAGE, pageNum);
-
-      if (requestId !== latestRequestId.current) return;
-
-      console.log("Search Query:", query);
-      console.log("API Response:", response);
-      console.log("Items Found:", response.data?.length);
-
-      const itemsData = response.data || [];
-
-      setTotalRecords(response.totalRecords ?? itemsData.length);
-      setCurrentPage(pageNum);
-
-      if (isFirstPage) {
-        setItems(itemsData);
-      } else {
-        setItems((prev) => [...prev, ...itemsData]);
-      }
-    } catch (err) {
-      if (requestId !== latestRequestId.current) return;
-
-      const msg = err instanceof Error ? err.message : "Search failed";
-      setError(msg);
-    } finally {
-      if (requestId !== latestRequestId.current) return;
-
-      if (pageNum === 1) setIsSearching(false);
-      else setLoadingMore(false);
-    }
-  };
-
-  const handleEndReachedWithSearch = () => {
-    if (loadingMore || items.length >= totalRecords) return;
-
-    if (searchQuery.trim()) {
-      performSearch(searchQuery.trim(), currentPage + 1);
-    } else {
-      fetchItems(currentPage + 1);
-    }
-  };
-
-  const renderItem = ({ item }: any) => {
-    return <ItemCard item={item} />;
-  };
-
-  const renderSkeletonItem = ({ item }: { item: number }) => (
+function SkeletonCard() {
+  return (
     <View style={styles.card}>
       <View style={[styles.skeletonBlock, styles.skeletonImage]} />
       <View style={[styles.skeletonBlock, styles.skeletonCode]} />
@@ -311,19 +138,184 @@ export default function Index() {
       <View style={[styles.skeletonBlock, styles.skeletonPrice]} />
     </View>
   );
+}
 
+// ─── Category filter image (with no-image fallback) ───────────────────────────
+
+function CategoryFilterImage({
+  uri,
+  style,
+}: {
+  uri: string | null;
+  style: any;
+}) {
+  const [src, setSrc] = useState<any>(
+    uri ? { uri } : PLACEHOLDER_IMAGE,
+  );
+
+  return (
+    <Image
+      source={src}
+      style={style}
+      resizeMode="cover"
+      onError={() => setSrc(PLACEHOLDER_IMAGE)}
+    />
+  );
+}
+
+// ─── Main screen ──────────────────────────────────────────────────────────────
+
+export default function Index() {
+  const { setTotalItems } = useContext(ItemsContext);
+  const insets = useSafeAreaInsets();
+
+  // ── Local UI state ──
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterVisible, setFilterVisible] = useState(false);
+  const [syncSettingsVisible, setSyncSettingsVisible] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedSubCategories, setSelectedSubCategories] = useState<string[]>(
+    [],
+  );
+  const [appliedFilters, setAppliedFilters] =
+    useState<ItemFilters>(emptyFilters);
+  const [page, setPage] = useState(1);
+
+  // ── Offline-first hook (all data, search, filter from cache) ──
+  const {
+    items,
+    allItems,
+    filterCategories,
+    totalRecords,
+    loading,
+    refreshing,
+    syncing,
+    isOffline,
+    statusMessage,
+    error,
+    lastSyncAt,
+    syncIntervalMinutes,
+    setSyncIntervalMinutes,
+    refresh,
+  } = useItems({
+    searchQuery,
+    filters: appliedFilters,
+    page,
+    pageSize: ITEMS_PER_PAGE,
+  });
+
+  // Keep ItemsContext in sync with total
+  useEffect(() => {
+    setTotalItems(totalRecords);
+  }, [totalRecords, setTotalItems]);
+
+  const containerStyle = Platform.select({
+    native: { paddingTop: 0 },
+    web: { paddingTop: 0 },
+  });
+
+  // ── Filter helpers ──
+  const activeCategory = useMemo(
+    () =>
+      filterCategories.find((c) => c.name === selectedCategory) ||
+      filterCategories[0],
+    [filterCategories, selectedCategory],
+  );
+
+  const visibleSubCategories = activeCategory?.subCategories || [];
+  const allVisibleSubCategoriesSelected =
+    visibleSubCategories.length > 0 &&
+    visibleSubCategories.every((item) => selectedSubCategories.includes(item));
+
+  const handleFilterPress = () => {
+    // Restore the last applied selection when reopening the filter
+    setSelectedCategory(
+      appliedFilters.subCategories.length > 0
+        ? (filterCategories.find((c) =>
+            c.subCategories.some((s) => appliedFilters.subCategories.includes(s))
+          )?.name ?? filterCategories[0]?.name ?? "")
+        : (filterCategories[0]?.name ?? "")
+    );
+    setSelectedSubCategories(appliedFilters.subCategories);
+    setFilterVisible(true);
+  };
+
+  const toggleSubCategory = (subCategory: string) => {
+    setSelectedSubCategories((current) =>
+      current.includes(subCategory)
+        ? current.filter((item) => item !== subCategory)
+        : [...current, subCategory],
+    );
+  };
+
+  const handleSelectAllSubCategories = () => {
+    if (!visibleSubCategories.length) return;
+
+    setSelectedSubCategories((current) => {
+      if (allVisibleSubCategoriesSelected) {
+        return current.filter((item) => !visibleSubCategories.includes(item));
+      }
+
+      return Array.from(new Set([...current, ...visibleSubCategories]));
+    });
+  };
+
+  const resetFilters = () => {
+    setSelectedCategory(filterCategories[0]?.name || "");
+    setSelectedSubCategories([]);
+    setAppliedFilters(emptyFilters);
+    setFilterVisible(false);
+    setPage(1);
+  };
+
+  const applyFilters = () => {
+    // Apply by subCategories only — supports multi-category selection
+    setAppliedFilters({
+      category: "",
+      subCategories: selectedSubCategories,
+    });
+    setFilterVisible(false);
+    setPage(1);
+  };
+
+  const handleSearch = (text: string) => {
+    setSearchQuery(text);
+    setPage(1);
+  };
+
+  // ── Infinite scroll (virtual — all data is in memory, just slicing) ──
+  const handleEndReached = () => {
+    if (items.length >= totalRecords) return;
+
+    setPage((prev) => prev + 1);
+  };
+
+  // ── Render helpers ──
+  const renderItem = ({ item }: { item: ItemCatalogItem }) => (
+    <ItemCard item={item} />
+  );
+
+  const renderSkeletonItem = ({ item }: { item: number }) => (
+    <SkeletonCard key={item} />
+  );
+
+  const keyExtractor = (item: ItemCatalogItem, index: number) =>
+    String(item.id ?? item.itemId ?? item.identity?.itemCode ?? index);
+
+  // ── Sync settings modal (kept as inline JSX below — do NOT define as a
+  //    component inside render; that causes React to remount it every render)
+
+  // ── Loading skeleton ──
   if (loading) {
     return (
       <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
         <View style={[styles.container, containerStyle]}>
-          {Platform.OS !== "web" && (
-            <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
-          )}
+          <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
           <FlatList
             style={{ marginTop: 8 }}
             data={SKELETON_ITEMS}
             renderItem={renderSkeletonItem}
-            keyExtractor={(item) => `item-skeleton-${item}`}
+            keyExtractor={(item) => `skeleton-${item}`}
             numColumns={2}
             columnWrapperStyle={styles.row}
             scrollEnabled={false}
@@ -338,59 +330,132 @@ export default function Index() {
     );
   }
 
-  if (error) {
+  // ── Error (network down + no cache) ──
+  if (error && allItems.length === 0) {
     return (
-      <View style={styles.centerContainer}>
-        <Text style={styles.errorText}>{error}</Text>
-      </View>
+      <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
+        <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
+        <View style={styles.centerContainer}>
+          <Ionicons name="cloud-offline-outline" size={52} color="#ccc" />
+          <Text style={styles.errorHeading}>Could not load items</Text>
+          <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => refresh()}
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
+  // ── Main catalog ──
   return (
     <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
       <View style={[styles.container, containerStyle]}>
-        {/* Header - Only show on native */}
-        {Platform.OS !== "web" && (
-          <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
-        )}
+        {/* Header — all platforms */}
+        <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
 
-        {/* Product Grid */}
-        {items.length === 0 && searchQuery.trim() && !isSearching ? (
+        {/* Sync strip — shows status, manual Sync Now button, and gear for interval settings */}
+        <View style={styles.syncBar}>
+          {/* Left: status */}
+          <View style={styles.syncBarLeft}>
+            {syncing ? (
+              <ActivityIndicator
+                size="small"
+                color="#0A84C6"
+                style={{ marginRight: 6 }}
+              />
+            ) : (
+              <Ionicons
+                name="sync-outline"
+                size={13}
+                color="#0A84C6"
+                style={{ marginRight: 4 }}
+              />
+            )}
+            <Text style={styles.syncBarText} numberOfLines={1}>
+              {syncing ? "Syncing…" : `Synced ${formatSyncTime(lastSyncAt)}`}
+            </Text>
+          </View>
+
+          {/* Right: manual sync + settings */}
+          <View style={styles.syncBarRight}>
+            <TouchableOpacity
+              style={[styles.syncNowBtn, syncing && styles.syncNowBtnDisabled]}
+              onPress={syncing ? undefined : refresh}
+              activeOpacity={0.75}
+              disabled={syncing}
+            >
+              <Text style={styles.syncNowBtnText}>Sync Now</Text>
+            </TouchableOpacity>
+
+            {/* <TouchableOpacity
+              style={styles.syncGearBtn}
+              onPress={() => setSyncSettingsVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="settings-outline" size={15} color="#9EAABB" />
+            </TouchableOpacity> */}
+          </View>
+        </View>
+
+        {/* Product grid */}
+        {items.length === 0 && searchQuery.trim() ? (
           <View style={styles.centerContainer}>
             <Ionicons name="search-outline" size={48} color="#ccc" />
-            <Text style={styles.loadingText}>No items found</Text>
-            <Text style={styles.errorText} numberOfLines={2}>
+            <Text style={styles.emptyHeading}>No items found</Text>
+            <Text style={styles.emptyText}>
               Try searching for different keywords
             </Text>
+          </View>
+        ) : items.length === 0 && statusMessage ? (
+          <View style={styles.centerContainer}>
+            <Ionicons name="cloud-offline-outline" size={52} color="#ccc" />
+            <Text style={styles.emptyHeading}>No cached data</Text>
+            <Text style={styles.emptyText}>{statusMessage}</Text>
           </View>
         ) : (
           <FlatList
             style={{ marginTop: 8 }}
             data={items}
             renderItem={renderItem}
-            keyExtractor={(item, index) =>
-              item.id?.toString() || item.itemId?.toString() || index.toString()
-            }
+            keyExtractor={keyExtractor}
             numColumns={2}
             columnWrapperStyle={styles.row}
             showsVerticalScrollIndicator={false}
-            onEndReached={handleEndReachedWithSearch}
+            onEndReached={handleEndReached}
             onEndReachedThreshold={0.5}
+            // Performance knobs for 1k-10k items
+            initialNumToRender={20}
+            maxToRenderPerBatch={20}
+            windowSize={10}
+            removeClippedSubviews={Platform.OS !== "web"}
+            getItemLayout={undefined}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={refresh}
+                tintColor="#0A84C6"
+                colors={["#0A84C6"]}
+              />
+            }
             contentContainerStyle={{
               paddingHorizontal: 10,
               paddingBottom: insets.bottom + 8,
             }}
             ListHeaderComponent={
-              isSearching ? (
-                <View style={styles.searchLoader}>
-                  <ActivityIndicator size="small" />
-                </View>
+              // Only show StatusBanner for offline / cached-data messages.
+              // Do NOT pass syncing here — that was causing the second loader.
+              statusMessage ? (
+                <StatusBanner message={statusMessage} isOffline={isOffline} />
               ) : null
             }
             ListFooterComponent={
-              loadingMore ? (
+              items.length < totalRecords ? (
                 <View style={styles.footerLoader}>
-                  <ActivityIndicator size="small" />
+                  <ActivityIndicator size="small" color="#0A84C6" />
                 </View>
               ) : null
             }
@@ -398,120 +463,234 @@ export default function Index() {
         )}
       </View>
 
+      {/* Filter modal */}
       <Modal
         visible={filterVisible}
-        transparent
         animationType="slide"
         onRequestClose={() => setFilterVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.filterSheet}>
-            <View style={styles.filterHeader}>
-              <Text style={styles.filterTitle}>Filters</Text>
+        <SafeAreaView style={styles.filterScreen} edges={["top", "bottom"]}>
+          <View style={styles.filterHeader}>
+            <TouchableOpacity
+              style={styles.filterHeaderButton}
+              onPress={() => setFilterVisible(false)}
+            >
+              <Ionicons name="arrow-back" size={32} color="#111" />
+            </TouchableOpacity>
 
-              <TouchableOpacity onPress={() => setFilterVisible(false)}>
-                <Ionicons name="close" size={24} color="#333" />
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.filterTitle}>FILTER</Text>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.sectionTitle}>Price Range</Text>
+            <TouchableOpacity
+              style={styles.filterHeaderButton}
+              onPress={resetFilters}
+            >
+              <Text style={styles.resetText}>RESET</Text>
+            </TouchableOpacity>
+          </View>
 
-              {["0-100", "100-500", "500-1000", "1000+"].map((item) => (
-                <TouchableOpacity
-                  key={item}
-                  style={styles.optionRow}
-                  onPress={() => setSelectedPrice(item)}
-                >
-                  <Ionicons
-                    name={
-                      selectedPrice === item
-                        ? "radio-button-on"
-                        : "radio-button-off"
-                    }
-                    size={20}
-                    color="#0A66C2"
-                  />
-                  <Text style={styles.optionText}>{item}</Text>
-                </TouchableOpacity>
-              ))}
+          <View style={styles.filterContent}>
+            <ScrollView
+              style={styles.categoryRail}
+              showsVerticalScrollIndicator={false}
+            >
+              {filterCategories.map((category: FilterCategory) => {
+                const isActive = activeCategory?.name === category.name;
+                // Count how many of this category's subcategories are selected
+                const selCount = category.subCategories.filter((s) =>
+                  selectedSubCategories.includes(s)
+                ).length;
 
-              <Text style={styles.sectionTitle}>Category</Text>
-
-              {["Electronics", "Furniture", "Machinery"].map((item) => (
-                <TouchableOpacity
-                  key={item}
-                  style={styles.optionRow}
-                  onPress={() => setSelectedCategory(item)}
-                >
-                  <Ionicons
-                    name={
-                      selectedCategory === item
-                        ? "radio-button-on"
-                        : "radio-button-off"
-                    }
-                    size={20}
-                    color="#0A66C2"
-                  />
-                  <Text style={styles.optionText}>{item}</Text>
-                </TouchableOpacity>
-              ))}
-
-              <Text style={styles.sectionTitle}>Subcategory</Text>
-
-              {["Mobile", "Laptop", "Table", "Chair"].map((item) => (
-                <TouchableOpacity
-                  key={item}
-                  style={styles.optionRow}
-                  onPress={() => setSelectedSubCategory(item)}
-                >
-                  <Ionicons
-                    name={
-                      selectedSubCategory === item
-                        ? "radio-button-on"
-                        : "radio-button-off"
-                    }
-                    size={20}
-                    color="#0A66C2"
-                  />
-                  <Text style={styles.optionText}>{item}</Text>
-                </TouchableOpacity>
-              ))}
+                return (
+                  <TouchableOpacity
+                    key={category.name}
+                    style={[
+                      styles.categoryFilterItem,
+                      isActive && styles.categoryFilterItemActive,
+                    ]}
+                    onPress={() => {
+                      // Only change the VIEW — do NOT clear selections
+                      setSelectedCategory(category.name);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.categoryImageOuter}>
+                      <View
+                        style={[
+                          styles.categoryImageWrap,
+                          isActive && styles.categoryImageWrapActive,
+                        ]}
+                      >
+                        <CategoryFilterImage
+                          uri={category.imageUrl}
+                          style={styles.categoryFilterImage}
+                        />
+                      </View>
+                      {selCount > 0 && (
+                        <View style={styles.selectionBadge}>
+                          <Text style={styles.selectionBadgeText}>
+                            {selCount}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text
+                      style={[
+                        styles.categoryFilterText,
+                        isActive && styles.categoryFilterTextActive,
+                        selCount > 0 && styles.categoryFilterTextSelected,
+                      ]}
+                      numberOfLines={3}
+                    >
+                      {category.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </ScrollView>
 
-            <View style={styles.filterButtons}>
-              <TouchableOpacity
-                style={styles.clearButton}
-                onPress={() => {
-                  setSelectedPrice("");
-                  setSelectedCategory("");
-                  setSelectedSubCategory("");
-                }}
-              >
-                <Text style={styles.clearButtonText}>Clear</Text>
-              </TouchableOpacity>
+            <View style={styles.subCategoryPanel}>
+              <Text style={styles.sectionTitle}>SUB CATEGORIES</Text>
 
-              <TouchableOpacity
-                style={styles.applyButton}
-                onPress={() => {
-                  console.log({
-                    selectedPrice,
-                    selectedCategory,
-                    selectedSubCategory,
-                  });
+              {visibleSubCategories.length ? (
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  <TouchableOpacity
+                    style={styles.checkboxRow}
+                    onPress={handleSelectAllSubCategories}
+                    activeOpacity={0.75}
+                  >
+                    <Ionicons
+                      name={
+                        allVisibleSubCategoriesSelected
+                          ? "checkbox"
+                          : "square-outline"
+                      }
+                      size={20}
+                      color={
+                        allVisibleSubCategoriesSelected ? "#0A84C6" : "#C9D3DE"
+                      }
+                    />
+                    <Text style={styles.checkboxText}>Select All</Text>
+                  </TouchableOpacity>
 
-                  setFilterVisible(false);
-                }}
-              >
-                <Text style={styles.applyButtonText}>Apply</Text>
-              </TouchableOpacity>
+                  {visibleSubCategories.map((subCategory) => {
+                    const isSelected =
+                      selectedSubCategories.includes(subCategory);
+
+                    return (
+                      <TouchableOpacity
+                        key={subCategory}
+                        style={styles.checkboxRow}
+                        onPress={() => toggleSubCategory(subCategory)}
+                        activeOpacity={0.75}
+                      >
+                        <Ionicons
+                          name={isSelected ? "checkbox" : "square-outline"}
+                          size={20}
+                          color={isSelected ? "#0A84C6" : "#C9D3DE"}
+                        />
+                        <Text style={styles.checkboxText}>{subCategory}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              ) : (
+                <View style={styles.emptyFilterState}>
+                  <Text style={styles.emptyFilterText}>
+                    No sub categories found
+                  </Text>
+                </View>
+              )}
             </View>
           </View>
-        </View>
+
+          <View style={styles.applyFilterBar}>
+            {selectedSubCategories.length > 0 && (
+              <Text style={styles.applySelectionSummary}>
+                {selectedSubCategories.length} sub-categor
+                {selectedSubCategories.length === 1 ? "y" : "ies"} selected
+              </Text>
+            )}
+            <TouchableOpacity
+              style={[
+                styles.applyButton,
+                selectedSubCategories.length === 0 &&
+                  styles.applyButtonDisabled,
+              ]}
+              onPress={
+                selectedSubCategories.length > 0 ? applyFilters : undefined
+              }
+              activeOpacity={selectedSubCategories.length > 0 ? 0.85 : 1}
+            >
+              <Text style={styles.applyButtonText}>APPLY FILTERS</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* Sync settings modal — inline JSX to avoid remount-on-rerender crash */}
+      <Modal
+        visible={syncSettingsVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setSyncSettingsVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setSyncSettingsVisible(false)}
+        >
+          <View style={styles.syncSheet}>
+            <Text style={styles.syncSheetTitle}>Sync Interval</Text>
+            <Text style={styles.syncSheetSub}>
+              Last synced: {formatSyncTime(lastSyncAt)}
+            </Text>
+
+            {syncIntervals.map((mins) => (
+              <TouchableOpacity
+                key={mins}
+                style={[
+                  styles.syncOption,
+                  syncIntervalMinutes === mins && styles.syncOptionActive,
+                ]}
+                onPress={() => {
+                  setSyncIntervalMinutes(mins as SyncIntervalMinutes);
+                  setSyncSettingsVisible(false);
+                }}
+                activeOpacity={0.75}
+              >
+                <Text
+                  style={[
+                    styles.syncOptionText,
+                    syncIntervalMinutes === mins && styles.syncOptionTextActive,
+                  ]}
+                >
+                  {mins} minutes
+                </Text>
+                {syncIntervalMinutes === mins && (
+                  <Ionicons name="checkmark" size={20} color="#0A84C6" />
+                )}
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              style={styles.syncNowButton}
+              onPress={() => {
+                setSyncSettingsVisible(false);
+                refresh();
+              }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="refresh" size={16} color="#fff" />
+              <Text style={styles.syncNowText}>Sync Now</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
       </Modal>
     </SafeAreaView>
   );
 }
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   container: {
@@ -524,19 +703,109 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
+    padding: 24,
   },
 
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
+  errorHeading: {
+    marginTop: 12,
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111",
   },
 
   errorText: {
-    color: "red",
-    fontSize: 16,
+    marginTop: 6,
+    color: "#E94B55",
+    fontSize: 13,
     textAlign: "center",
   },
 
+  retryButton: {
+    marginTop: 20,
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    backgroundColor: "#0A84C6",
+    borderRadius: 10,
+  },
+
+  retryText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 15,
+  },
+
+  emptyHeading: {
+    marginTop: 12,
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111",
+  },
+
+  emptyText: {
+    marginTop: 6,
+    fontSize: 13,
+    color: "#8a8a8a",
+    textAlign: "center",
+  },
+
+  // ── Sync bar ──
+  syncBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    backgroundColor: "#EAF6FF",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#C6DFF0",
+  },
+
+  syncBarLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+    minWidth: 0,
+  },
+
+  syncBarRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginLeft: 8,
+  },
+
+  syncBarText: {
+    fontSize: 11,
+    color: "#0A84C6",
+    fontWeight: "500",
+    flexShrink: 1,
+  },
+
+  syncNowBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    backgroundColor: "#0A84C6",
+    borderRadius: 10,
+  },
+
+  syncNowBtnDisabled: {
+    opacity: 0.45,
+  },
+
+  syncNowBtnText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  syncGearBtn: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  // ── Cards / grid ──
   row: {
     justifyContent: "space-between",
     paddingHorizontal: 0,
@@ -570,6 +839,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
 
+  // ── Skeleton ──
   skeletonBlock: {
     backgroundColor: "#ececec",
     borderRadius: 6,
@@ -613,6 +883,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
 
+  // ── Item text ──
   itemName: {
     fontSize: 12,
     fontWeight: "600",
@@ -652,86 +923,282 @@ const styles = StyleSheet.create({
 
   footerLoader: {
     paddingVertical: 20,
+    alignItems: "center",
   },
 
-  searchLoader: {
-    paddingVertical: 12,
-  },
-
-  modalOverlay: {
+  // ── Filter modal ──
+  filterScreen: {
     flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0,0,0,0.4)",
-  },
-
-  filterSheet: {
     backgroundColor: "#fff",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: "80%",
   },
 
   filterHeader: {
+    height: 48,
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 20,
+    justifyContent: "space-between",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#E8EDF3",
+    paddingHorizontal: 12,
+  },
+
+  filterHeaderButton: {
+    minWidth: 56,
+    height: 40,
+    justifyContent: "center",
+  },
+
+  resetText: {
+    color: "#E94B55",
+    fontSize: 13,
+    fontWeight: "700",
+    textAlign: "right",
   },
 
   filterTitle: {
-    fontSize: 20,
+    color: "#111",
+    fontSize: 15,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
+
+  filterContent: {
+    flex: 1,
+    flexDirection: "row",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#ECEFF3",
+  },
+
+  categoryRail: {
+    width: "25%",
+    backgroundColor: "#F8FAFC",
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: "#E8EDF3",
+  } as any,
+
+  categoryFilterItem: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#E8EDF3",
+  },
+
+  categoryFilterItemActive: {
+    backgroundColor: "#EAF6FF",
+  },
+
+  categoryImageOuter: {
+    position: "relative",
+  },
+
+  categoryImageWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    overflow: "hidden",
+    backgroundColor: "#E9EEF4",
+  },
+
+  categoryImageWrapActive: {
+    borderWidth: 2,
+    borderColor: "#0A84C6",
+  },
+
+  categoryFilterImage: {
+    width: "100%",
+    height: "100%",
+  } as any,
+
+  selectionBadge: {
+    position: "absolute",
+    top: -3,
+    right: -3,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "#0A84C6",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 3,
+  },
+
+  selectionBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: "800",
+    lineHeight: 11,
+  },
+
+  categoryFilterText: {
+    color: "#718093",
+    fontSize: 10,
+    fontWeight: "500",
+    lineHeight: 13,
+    textAlign: "center",
+  },
+
+  categoryFilterTextActive: {
+    color: "#0A84C6",
     fontWeight: "700",
   },
 
+  categoryFilterTextSelected: {
+    color: "#0A84C6",
+  },
+
+  subCategoryPanel: {
+    width: "75%",
+    backgroundColor: "#fff",
+    paddingLeft: 12,
+  } as any,
+
   sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginTop: 20,
-    marginBottom: 10,
+    color: "#9EAABB",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    paddingTop: 12,
+    paddingBottom: 8,
+    paddingRight: 12,
   },
 
-  optionRow: {
+  checkboxRow: {
+    minHeight: 42,
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 10,
+    gap: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#EFF2F5",
+    paddingRight: 12,
   },
 
-  optionText: {
-    marginLeft: 10,
-    fontSize: 15,
-  },
-
-  filterButtons: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 20,
-  },
-
-  clearButton: {
+  checkboxText: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 8,
-    paddingVertical: 12,
-    marginRight: 10,
+    color: "#344253",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+
+  emptyFilterState: {
+    flex: 1,
     alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+
+  emptyFilterText: {
+    color: "#8794A6",
+    fontSize: 12,
+    textAlign: "center",
+  },
+
+  applyFilterBar: {
+    backgroundColor: "#fff",
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "#EEF1F4",
+    gap: 8,
+  },
+
+  applySelectionSummary: {
+    fontSize: 11,
+    color: "#0A84C6",
+    fontWeight: "600",
+    textAlign: "center",
   },
 
   applyButton: {
-    flex: 1,
-    backgroundColor: "#0A66C2",
+    height: 44,
     borderRadius: 8,
-    paddingVertical: 12,
     alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0A84C6",
   },
 
-  clearButtonText: {
-    fontWeight: "600",
+  applyButtonDisabled: {
+    opacity: 0.4,
   },
 
   applyButtonText: {
     color: "#fff",
-    fontWeight: "600",
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+
+  // ── Sync settings sheet ──
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0,0,0,0.35)",
+  },
+
+  syncSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 40,
+    gap: 4,
+  },
+
+  syncSheetTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: "#0d0d0d",
+    marginBottom: 2,
+  },
+
+  syncSheetSub: {
+    fontSize: 12,
+    color: "#9EAABB",
+    marginBottom: 16,
+  },
+
+  syncOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#EFF2F5",
+  },
+
+  syncOptionActive: {
+    // intentionally minimal — the checkmark is the indicator
+  },
+
+  syncOptionText: {
+    fontSize: 16,
+    color: "#344253",
+    fontWeight: "500",
+  },
+
+  syncOptionTextActive: {
+    color: "#0A84C6",
+    fontWeight: "700",
+  },
+
+  syncNowButton: {
+    marginTop: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#0A84C6",
+    borderRadius: 12,
+    paddingVertical: 14,
+  },
+
+  syncNowText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
   },
 });
