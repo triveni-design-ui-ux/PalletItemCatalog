@@ -149,16 +149,19 @@ function CategoryFilterImage({
   uri: string | null;
   style: any;
 }) {
-  const [src, setSrc] = useState<any>(
-    uri ? { uri } : PLACEHOLDER_IMAGE,
-  );
+  const [hasError, setHasError] = useState(false);
+
+  // Reset error state when uri changes
+  useEffect(() => {
+    setHasError(false);
+  }, [uri]);
 
   return (
     <Image
-      source={src}
+      source={!hasError && uri ? { uri } : PLACEHOLDER_IMAGE}
       style={style}
       resizeMode="cover"
-      onError={() => setSrc(PLACEHOLDER_IMAGE)}
+      onError={() => setHasError(true)}
     />
   );
 }
@@ -232,9 +235,13 @@ export default function Index() {
     setSelectedCategory(
       appliedFilters.subCategories.length > 0
         ? (filterCategories.find((c) =>
-            c.subCategories.some((s) => appliedFilters.subCategories.includes(s))
-          )?.name ?? filterCategories[0]?.name ?? "")
-        : (filterCategories[0]?.name ?? "")
+            c.subCategories.some((s) =>
+              appliedFilters.subCategories.includes(s),
+            ),
+          )?.name ??
+            filterCategories[0]?.name ??
+            "")
+        : (filterCategories[0]?.name ?? ""),
     );
     setSelectedSubCategories(appliedFilters.subCategories);
     setFilterVisible(true);
@@ -357,7 +364,7 @@ export default function Index() {
         {/* Header — all platforms */}
         <Header onSearch={handleSearch} onFilterPress={handleFilterPress} />
 
-        {/* Sync strip — shows status, manual Sync Now button, and gear for interval settings */}
+        {/* Sync strip — shows status, item count, manual Sync Now button */}
         <View style={styles.syncBar}>
           {/* Left: status */}
           <View style={styles.syncBarLeft}>
@@ -380,7 +387,16 @@ export default function Index() {
             </Text>
           </View>
 
-          {/* Right: manual sync + settings */}
+          {/* Center: item count badge */}
+          {allItems.length > 0 && (
+            <View style={styles.itemCountBadge}>
+              <Text style={styles.itemCountText}>
+                {allItems.length.toLocaleString()} items
+              </Text>
+            </View>
+          )}
+
+          {/* Right: manual sync */}
           <View style={styles.syncBarRight}>
             <TouchableOpacity
               style={[styles.syncNowBtn, syncing && styles.syncNowBtnDisabled]}
@@ -390,14 +406,6 @@ export default function Index() {
             >
               <Text style={styles.syncNowBtnText}>Sync Now</Text>
             </TouchableOpacity>
-
-            {/* <TouchableOpacity
-              style={styles.syncGearBtn}
-              onPress={() => setSyncSettingsVisible(true)}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="settings-outline" size={15} color="#9EAABB" />
-            </TouchableOpacity> */}
           </View>
         </View>
 
@@ -475,7 +483,7 @@ export default function Index() {
               style={styles.filterHeaderButton}
               onPress={() => setFilterVisible(false)}
             >
-              <Ionicons name="arrow-back" size={32} color="#111" />
+              <Ionicons name="arrow-back" size={20} color="#111" />
             </TouchableOpacity>
 
             <Text style={styles.filterTitle}>FILTER</Text>
@@ -497,7 +505,7 @@ export default function Index() {
                 const isActive = activeCategory?.name === category.name;
                 // Count how many of this category's subcategories are selected
                 const selCount = category.subCategories.filter((s) =>
-                  selectedSubCategories.includes(s)
+                  selectedSubCategories.includes(s),
                 ).length;
 
                 return (
@@ -792,6 +800,22 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
 
+  itemCountBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#D8EDF8",
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    marginHorizontal: 6,
+  },
+
+  itemCountText: {
+    fontSize: 10,
+    color: "#2A6A8A",
+    fontWeight: "600",
+  },
+
   syncNowBtnText: {
     color: "#fff",
     fontSize: 11,
@@ -1000,10 +1024,11 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     overflow: "hidden",
     backgroundColor: "#E9EEF4",
+    borderWidth: 2,
+    borderColor: "transparent",
   },
 
   categoryImageWrapActive: {
-    borderWidth: 2,
     borderColor: "#0A84C6",
   },
 

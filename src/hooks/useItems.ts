@@ -87,7 +87,10 @@ export const useItems = ({
     setLastSyncAt(result.lastSyncAt);
     setStatusMessage(result.message);
 
-    if (result.changed) {
+    // Always update allItems from the sync result so the full merged catalog
+    // is reflected in the UI — even when result.changed is false but allItems
+    // is still empty (e.g. first load from cache before any sync completes).
+    if (result.items.length > 0) {
       setAllItems(result.items);
     }
   }, []);

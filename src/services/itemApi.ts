@@ -24,6 +24,10 @@ export interface ItemCatalogItem {
   statusControl?: {
     isActive?: boolean;
     isDeleted?: boolean;
+    isDeal?: boolean;
+    isCashAndCarry?: boolean;
+    itemLimit?: boolean;
+    maxQuantityLimit?: number | null;
   };
   [key: string]: unknown;
 }
@@ -216,12 +220,36 @@ const getTotalPages = (paging?: string) => {
   }
 };
 
-const fetchCatalogPage = (pageNumber: number) =>
+/** Converts a timestamp (ms) or Date to YYYY-MM-DD string. */
+export const toDateString = (date: Date | number): string => {
+  const d = typeof date === "number" ? new Date(date) : date;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+/**
+ * Fetches one page from the catalog API.
+ *
+ * @param updateDate - When provided, the API returns only items changed on/after
+ *                     this date. When omitted entirely, the API returns all items
+ *                     (full catalog). We use `...(spread)` to omit the key rather
+ *                     than sending `updateDate: undefined`, which some APIs treat
+ *                     differently from "key not present".
+ */
+const fetchCatalogPage = (pageNumber: number, updateDate?: string) =>
   api.post<ApiCatalogResponse>("/api/ShopifyItem/Item/external/get", {
     pageNumber,
     pageSize: CATALOG_FETCH_PAGE_SIZE,
+    ...(updateDate !== undefined ? { updateDate } : {}),
   });
 
+/**
+ * Full catalog fetch — NO `updateDate` sent to the API.
+ * The API returns every item; we filter to only visible ones.
+ * Use this on first load or when the user forces a full refresh.
+ */
 export const fetchAllItemsFromApi = async (): Promise<ItemCatalogItem[]> => {
   const firstResponse = await fetchCatalogPage(1);
   const totalPages = Math.min(
@@ -238,4 +266,36 @@ export const fetchAllItemsFromApi = async (): Promise<ItemCatalogItem[]> => {
     ...(firstResponse.data.data || []),
     ...remainingResponses.flatMap((response) => response.data.data || []),
   ].filter(isVisibleItem);
+};
+
+/**
+ * Incremental fetch — sends `updateDate` so the API returns ONLY items
+ * changed since that date (price changes, new items, deletions, etc.).
+ *
+ * NOTE: Does NOT filter by isVisibleItem here — the caller (syncService)
+ * needs the raw list including deleted/inactive items so it can remove
+ * them from the local cache correctly.
+ *
+ * @param lastSyncAt - Unix timestamp (ms) of the last successful sync.
+ */
+export const fetchIncrementalItemsFromApi = async (
+  lastSyncAt: number,
+): Promise<ItemCatalogItem[]> => {
+  const updateDate = toDateString(lastSyncAt);
+
+  const firstResponse = await fetchCatalogPage(1, updateDate);
+  const totalPages = Math.min(
+    getTotalPages(firstResponse.data.Paging),
+    MAX_CATALOG_FETCH_PAGES,
+  );
+  const remainingResponses = await Promise.all(
+    Array.from({ length: Math.max(totalPages - 1, 0) }, (_, index) =>
+      fetchCatalogPage(index + 2, updateDate),
+    ),
+  );
+
+  return [
+    ...(firstResponse.data.data || []),
+    ...remainingResponses.flatMap((response) => response.data.data || []),
+  ];
 };
